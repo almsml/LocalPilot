@@ -52,7 +52,6 @@ type DeviceServiceClient struct {
 func Connect(ctx context.Context, host string, port uint16) (*DeviceServiceClient, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	slog.Info("正在连接 Controller gRPC", "addr", addr)
-
 	// 明文连接（Phase 0），Phase 4 替换为 TLS credentials
 	conn, err := grpc.DialContext(ctx, addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
