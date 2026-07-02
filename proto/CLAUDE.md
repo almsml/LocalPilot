@@ -16,8 +16,8 @@
 ## 修改 proto 后的操作
 
 ```bash
-# Rust Agent: 重新编译（build.rs 自动触发）
-cd agent && cargo build
+# Go Agent: 重新编译
+cd agent && go build ./cmd/agent/
 
 # Go Controller: 重新生成代码
 cd controller

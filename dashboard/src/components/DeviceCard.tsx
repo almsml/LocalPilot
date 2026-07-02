@@ -2,8 +2,15 @@
 // DeviceCard.tsx — 设备卡片
 //
 // 显示一台设备的实时状态：主机名、CPU/内存/温度、运行任务数。
+//
+// Phase 1 新增：点击卡片展开设备详情面板（DeviceDetail）。
+// 为什么点击事件在卡片级而不是详情按钮？
+//   整个卡片是设备信息的自然容器。点击任意位置都应该展示详情——
+//   这符合用户的心智模型："我想了解更多关于这台设备的信息"。
+//   单独的"详情"按钮增加视觉噪音且需要精确点击。
 // ============================================================
 
+import { useState } from 'react'
 import type { Device } from '@/types'
 
 /** 状态 → 颜色映射 */
@@ -30,19 +37,30 @@ function formatBytes(bytes: number): string {
 
 interface Props {
   device: Device
+  /** 点击卡片时调用，传递设备 ID */
+  onClick?: (deviceId: string) => void
 }
 
-export function DeviceCard({ device }: Props) {
+export function DeviceCard({ device, onClick }: Props) {
   const color = stateColor[device.state] || '#999'
+  const [isHovered, setIsHovered] = useState(false)
 
   return (
     <div
+      onClick={() => onClick?.(device.id)}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
       style={{
         border: `2px solid ${color}`,
         borderRadius: 12,
         padding: 16,
-        background: '#fff',
-        boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+        background: isHovered ? '#f8f9fa' : '#fff',
+        boxShadow: isHovered
+          ? '0 4px 12px rgba(0,0,0,0.15)'
+          : '0 1px 3px rgba(0,0,0,0.1)',
+        cursor: onClick ? 'pointer' : 'default',
+        transition: 'all 0.2s ease',
+        position: 'relative',
       }}
     >
       {/* 设备名 + 状态 */}
@@ -78,6 +96,24 @@ export function DeviceCard({ device }: Props) {
         <div>温度: {device.cpu_temperature > 0 ? `${device.cpu_temperature.toFixed(1)}°C` : 'N/A'}</div>
         <div>运行任务: {device.running_task_count} 个</div>
       </div>
+
+      {/* 悬停指示器——提示用户可点击查看详情 */}
+      {isHovered && onClick && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 8,
+            right: 8,
+            fontSize: 12,
+            color: '#999',
+            background: 'rgba(255,255,255,0.9)',
+            padding: '2px 6px',
+            borderRadius: 4,
+          }}
+        >
+          查看详情 →
+        </div>
+      )}
     </div>
   )
 }

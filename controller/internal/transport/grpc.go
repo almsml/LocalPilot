@@ -22,6 +22,7 @@ import (
 	"github.com/localpilot/controller/internal/registry"
 	"github.com/localpilot/controller/internal/scheduler"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -171,8 +172,29 @@ func (s *deviceServiceServer) Deregister(
 }
 
 // extractIP 从 gRPC context 中提取客户端 IP
+//
+// 为什么需要从 context 中提取 IP 而不是让 Agent 自己上报？
+//   Agent 自己上报的 IP 可能是内网地址（如果 Agent 在 NAT 后面），
+//   但 Controller 从 gRPC peer 中提取的是真实的连接地址。
+//   在 LAN 环境下两者通常一致，但 peer 提取更可靠。
+//
+// gRPC 的 peer.FromContext 返回发起连接的远程地址信息。
+// 这个地址是传输层的真实地址，不受应用层篡改。
 func extractIP(ctx context.Context) string {
-	// gRPC 的 peer 信息可以从 metadata 中提取
-	// 简化版：返回 upstream 的连接地址
-	return "127.0.0.1" // Phase 0: 本地测试
+	// 从 gRPC context 中获取 peer 信息
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		log.Println("[gRPC] 无法从 context 获取 peer 信息，回退到 127.0.0.1")
+		return "127.0.0.1"
+	}
+
+	// 解析 IP 地址——去掉端口部分
+	// p.Addr.String() 返回 "192.168.1.100:54321" 格式
+	host, _, err := net.SplitHostPort(p.Addr.String())
+	if err != nil {
+		log.Printf("[gRPC] 解析 peer 地址失败: %v，回退到 127.0.0.1", err)
+		return "127.0.0.1"
+	}
+
+	return host
 }

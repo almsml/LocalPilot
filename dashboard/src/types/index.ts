@@ -24,4 +24,8 @@ export interface Device {
   used_ram_bytes: number
   cpu_temperature: number
   running_task_count: number
+  /** 注册时间（ISO 8601 格式） */
+  registered_at: string
+  /** 最后心跳时间（ISO 8601 格式） */
+  last_heartbeat: string
 }

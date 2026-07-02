@@ -8,10 +8,10 @@
 //   4. 都不行 → 基础进程隔离（至少限制资源）
 //
 // 为什么需要多层降级而不是只支持 Docker？
-//   树莓派上跑 Docker 性能很差，Windows 上 Docker Desktop 不一定装了。
+//   旧设备上跑 Docker 性能很差，Windows 上 Docker Desktop 不一定装了。
 //   给用户选择的空间，而不是强依赖一个运行时。
 //
-// 与 Rust 版本 (agent/src/sandbox.rs) 对应。
+// 与 Go Agent 沙箱模块对应。
 // ============================================================
 
 package sandbox

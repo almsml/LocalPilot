@@ -50,6 +50,12 @@ func Run(
 ) {
 	slog.Info("心跳循环启动", "device_id", deviceID, "interval_sec", heartbeatInterval)
 
+	// 连续失败计数器——用于检测 Controller 不可达
+	// 为什么需要计数器而不是每次都打 ERROR？
+	//   偶尔的网络抖动（1-2 次失败）是正常的，打 ERROR 会误导排查。
+	//   连续失败才说明真的有问题——Controller 挂了或网络断了。
+	consecutiveFailures := 0
+
 	// time.NewTicker 创建周期性定时器
 	// 为什么用 Ticker 而不是 time.Sleep？
 	//   Ticker 的间隔是固定的——不受心跳请求耗时影响。
@@ -65,19 +71,56 @@ func Run(
 			return
 
 		case <-ticker.C:
-			sendHeartbeat(ctx, client, deviceID)
+			err := sendHeartbeat(ctx, client, deviceID)
+			if err != nil {
+				consecutiveFailures++
+
+				// 分级告警——不同严重程度用不同日志级别
+				// 为什么 3 次才打 WARN？
+				//   1-2 次失败可能只是网络抖动（WiFi 信道切换、交换机瞬时拥塞）。
+				//   3 次（15 秒）说明 Controller 可能真的不可达了。
+				// 为什么 6 次打 ERROR？
+				//   6 次（30 秒）已经超过 Controller 的 OFFLINE 阈值——
+				//   Controller 已经把这台设备标记为离线了。
+				if consecutiveFailures == 3 {
+					slog.Warn("心跳连续失败 3 次，Controller 可能不可达",
+						"device_id", deviceID,
+						"error", err,
+					)
+				} else if consecutiveFailures == 6 {
+					slog.Error("心跳连续失败 6 次（30 秒），设备可能已被标记为离线",
+						"device_id", deviceID,
+						"error", err,
+					)
+				} else {
+					slog.Debug("心跳发送失败",
+						"device_id", deviceID,
+						"consecutive_failures", consecutiveFailures,
+						"error", err,
+					)
+				}
+			} else {
+				// 一次成功就重置计数器——说明链路恢复了
+				if consecutiveFailures > 0 {
+					slog.Info("心跳恢复", "device_id", deviceID,
+						"previous_failures", consecutiveFailures)
+				}
+				consecutiveFailures = 0
+			}
 		}
 	}
 }
 
-// sendHeartbeat 发送一次心跳
+// sendHeartbeat 发送一次心跳，返回错误供调用方判断
 //
-// 与 Rust 版本 send_heartbeat() 对应。
+// 为什么改为返回 error 而不是在内部处理？
+//   调用方（Run 循环）需要计数连续失败次数，
+//   所以把错误传递出去让循环统一管理计数器。
 func sendHeartbeat(
 	ctx context.Context,
 	client *transport.DeviceServiceClient,
 	deviceID string,
-) {
+) error {
 	// 采集当前资源使用情况
 	usage := monitor.CollectResourceUsage()
 
@@ -86,18 +129,18 @@ func sendHeartbeat(
 		ResourceUsage: usage,
 	}
 
-	// 设置独立的超时时间，防止心跳请求 hang 住
+	// 设置独立的超时时间，防止单次心跳请求 hang 住整个循环
+	// 为什么是 3 秒？
+	//   LAN 环境下 gRPC 调用通常 < 50ms。3 秒已经给了足够余量
+	//   （慢设备、WiFi 波动），但不会让心跳循环阻塞太久。
 	sendCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
 	_, err := client.Heartbeat(sendCtx, req)
 	if err != nil {
-		slog.Error("心跳发送失败",
-			"device_id", deviceID,
-			"error", err,
-		)
-		return
+		return err
 	}
 
 	slog.Debug("心跳发送成功", "device_id", deviceID)
+	return nil
 }

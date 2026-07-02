@@ -10,9 +10,11 @@ import { DeviceCard } from './DeviceCard'
 
 interface Props {
   devices: Device[]
+  /** 点击设备卡片时调用，传递设备 ID */
+  onDeviceClick?: (deviceId: string) => void
 }
 
-export function DeviceGrid({ devices }: Props) {
+export function DeviceGrid({ devices, onDeviceClick }: Props) {
   if (devices.length === 0) {
     return (
       <div style={{ padding: 48, textAlign: 'center', color: '#999' }}>
@@ -33,7 +35,7 @@ export function DeviceGrid({ devices }: Props) {
       }}
     >
       {devices.map((device) => (
-        <DeviceCard key={device.id} device={device} />
+        <DeviceCard key={device.id} device={device} onClick={onDeviceClick} />
       ))}
     </div>
   )

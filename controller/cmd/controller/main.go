@@ -56,6 +56,16 @@ func main() {
 	devRegistry := registry.NewDeviceRegistry(store)
 	log.Println("设备注册表已初始化")
 
+	// ---- 2.5. 从 SQLite 恢复设备列表 ----
+	// Controller 重启后，之前注册的设备信息仍在 SQLite 中。
+	// 恢复到内存缓存，初始状态设为 OFFLINE——Agent 重连后会自动上线。
+	if loadedDevices, err := store.LoadDevices(); err != nil {
+		log.Printf("从数据库恢复设备列表失败: %v", err)
+	} else if len(loadedDevices) > 0 {
+		devRegistry.RestoreDevices(loadedDevices)
+		log.Printf("从数据库恢复了 %d 台设备（状态：OFFLINE，等待 Agent 重连）", len(loadedDevices))
+	}
+
 	// ---- 3. 启动心跳超时检测 ----
 	// 独立 goroutine，每秒检查一次所有设备的心跳时间戳。
 	// 15 秒无心跳 → UNHEALTHY，30 秒 → OFFLINE。
@@ -88,8 +98,10 @@ func main() {
 	}()
 
 	// ---- 7. 启动 mDNS 监听（可选） ----
-	// Phase 0 暂时跳过 mDNS，Agent 通过直接 IP 连接。
-	// Phase 1 启用此功能。
+	// mDNS 监听让 Controller 自动发现局域网内广播的 Agent。
+	// 为什么默认关闭？
+	//   Windows 上 mDNS 多播可能因防火墙或网络配置失败。
+	//   设置为 LOCALPILOT_ENABLE_MDNS=true 启用。
 	if getEnv("LOCALPILOT_ENABLE_MDNS", "false") == "true" {
 		go func() {
 			if err := discovery.ListenForAgents(devRegistry); err != nil {
@@ -98,7 +110,7 @@ func main() {
 		}()
 		log.Println("mDNS 监听已启动 (_localpilot._tcp)")
 	} else {
-		log.Println("mDNS 监听已禁用（Phase 1 实现）")
+		log.Println("mDNS 监听已禁用（设置 LOCALPILOT_ENABLE_MDNS=true 启用）")
 	}
 
 	// ---- 等待退出信号 ----

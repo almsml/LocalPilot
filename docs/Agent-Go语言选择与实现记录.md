@@ -26,8 +26,8 @@
 
 1. **Go 我已经会了**：Controller 就是用 Go 写的，写 Agent 不需要重新学语言
 2. **共享 proto 代码**：Agent 和 Controller 引用同一份 proto 生成的 Go 代码（`pkg/proto/`），不用维护两套生成逻辑
-3. **交叉编译同样简单**：`GOOS=linux GOARCH=arm64 go build` 一条命令出 ARM 二进制给树莓派用
-4. **二进制体积可接受**：Go 编译出 ~16MB，在树莓派上完全没问题（树莓派 SD 卡几十 GB）
+3. **交叉编译同样简单**：`GOOS=linux GOARCH=arm64 go build` 一条命令出 ARM 二进制给 ARM 设备用
+4. **二进制体积可接受**：Go 编译出 ~16MB，在旧设备上完全没问题
 5. **goroutine 天然适合这个场景**：每 5 秒一次心跳、长时间运行的任务执行、gRPC 流式通信——Go 的并发模型天生匹配
 
 **面试时如果被问"为什么不用 Rust？"**：
@@ -302,7 +302,7 @@ cd dashboard && npm run dev
 # http://localhost:5173
 ```
 
-交叉编译给树莓派：
+交叉编译给 ARM 设备：
 
 ```bash
 cd agent

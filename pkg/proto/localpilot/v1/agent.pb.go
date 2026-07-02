@@ -83,10 +83,10 @@ func (StreamType) EnumDescriptor() ([]byte, []int) {
 // 为什么需要这么多字段？
 //
 //	调度器需要足够的信息来决定"这个任务该分配给谁"
-//	比如 GPU 任务不能发给树莓派，ARM 二进制不能发给 x86 设备
+//	比如 GPU 任务不能发给无 GPU 设备，ARM 二进制不能发给 x86 设备
 type DeviceInfo struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
-	Hostname          string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`                                            // 设备主机名，如 "pi4-livingroom"
+	Hostname          string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`                                            // 设备主机名，如 "old-macbook"
 	Os                string                 `protobuf:"bytes,2,opt,name=os,proto3" json:"os,omitempty"`                                                        // 操作系统，如 "linux" / "macos" / "windows"
 	Arch              string                 `protobuf:"bytes,3,opt,name=arch,proto3" json:"arch,omitempty"`                                                    // CPU 架构，如 "x86_64" / "aarch64" / "armv7l"
 	CpuCores          uint32                 `protobuf:"varint,4,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`                           // 逻辑 CPU 核心数

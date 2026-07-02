@@ -67,14 +67,24 @@ func Load() (*Config, error) {
 // 辅助函数
 // ============================================================
 
-// getHostname 获取系统 hostname
+// getHostname 获取设备标识名
+//
+// 优先级：环境变量 LOCALPILOT_HOSTNAME > 系统 hostname
+//
+// 为什么需要 LOCALPILOT_HOSTNAME 环境变量？
+//   Windows 的 os.Hostname() 有时返回被截断的 NETBIOS 名（最多 15 字符），
+//   而不是完整的计算机名。Linux 容器中 hostname 常是随机容器 ID。
+//   环境变量让用户可以指定一个人类可读的设备名，对 Dashboard 展示更友好。
 //
 // 跨平台实现：
 //   - Linux/macOS: os.Hostname() 底层调用 gethostname(2)
 //   - Windows: os.Hostname() 底层调用 GetComputerNameExW
-//
-// 与 Rust 版本的 hostname::get() 模块功能一致。
 func getHostname() (string, error) {
+	// 优先使用用户显式指定的名称
+	if name := os.Getenv("LOCALPILOT_HOSTNAME"); name != "" {
+		return name, nil
+	}
+
 	name, err := os.Hostname()
 	if err != nil {
 		return "", fmt.Errorf("获取 hostname 失败: %w", err)

@@ -25,7 +25,7 @@ type DeviceHandler struct {
 //	  "devices": [
 //	    {
 //	      "id": "...",
-//	      "hostname": "pi4",
+//	      "hostname": "old-macbook",
 //	      "state": "ONLINE",
 //	      "cpu_percent": 0.35,
 //	      ...
