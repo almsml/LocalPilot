@@ -2,32 +2,20 @@
 // router.go — HTTP API 路由（gin）
 //
 // Dashboard 通过这个 API 获取设备列表、提交任务、查看日志。
-// 为什么用 gin？
-//   轻量、高性能、中间件生态成熟。
-//   路由分组 + 中间件让 API 结构清晰——/api/devices 和 /api/jobs 各自独立。
 // ============================================================
 
 package api
 
 import (
 	"github.com/gin-gonic/gin"
+	"github.com/localpilot/controller/internal/job"
 	"github.com/localpilot/controller/internal/registry"
 	"github.com/localpilot/controller/internal/scheduler"
 )
 
 // NewRouter 创建 gin 路由并注册所有 API 端点
-//
-// API 结构：
-//   GET  /api/devices       — 设备列表
-//   GET  /api/devices/:id   — 设备详情
-//   POST /api/jobs           — 提交任务
-//   GET  /api/jobs/:id       — 任务详情
-//   GET  /api/jobs/:id/logs  — 任务日志
-//   GET  /ws                 — WebSocket 连接（实时状态推送）
-func NewRouter(devReg *registry.DeviceRegistry, sch *scheduler.Scheduler) *gin.Engine {
+func NewRouter(devReg *registry.DeviceRegistry, sch *scheduler.Scheduler, jobMgr *job.Manager) *gin.Engine {
 	r := gin.Default()
-
-	// CORS 中间件——允许 Dashboard 开发服务器（Vite:5173）跨域访问
 	r.Use(corsMiddleware())
 
 	// 设备相关 API
@@ -39,9 +27,10 @@ func NewRouter(devReg *registry.DeviceRegistry, sch *scheduler.Scheduler) *gin.E
 	}
 
 	// 任务相关 API
-	jobHandler := &JobHandler{scheduler: sch}
+	jobHandler := NewJobHandler(jobMgr)
 	{
 		api.POST("/jobs", jobHandler.SubmitJob)
+		api.GET("/jobs", jobHandler.ListJobs)
 		api.GET("/jobs/:id", jobHandler.GetJob)
 	}
 
@@ -63,7 +52,6 @@ func corsMiddleware() gin.HandlerFunc {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return

@@ -345,6 +345,11 @@ func createTables(db *sql.DB) error {
 	return nil
 }
 
+// DB 返回底层 *sql.DB（供 job store 等复用同一个数据库连接）
+func (s *SQLiteStore) DB() *sql.DB {
+	return s.db
+}
+
 // Close 关闭数据库连接
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()

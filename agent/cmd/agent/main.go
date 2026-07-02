@@ -28,11 +28,14 @@ import (
 	"time"
 
 	"github.com/hashicorp/mdns"
+	pb "github.com/localpilot/proto/localpilot/v1"
 
 	"github.com/localpilot/agent/internal/config"
 	"github.com/localpilot/agent/internal/discovery"
+	"github.com/localpilot/agent/internal/executor"
 	"github.com/localpilot/agent/internal/heartbeat"
 	"github.com/localpilot/agent/internal/monitor"
+	"github.com/localpilot/agent/internal/sandbox"
 	"github.com/localpilot/agent/internal/transport"
 )
 
@@ -95,8 +98,21 @@ func main() {
 	deviceID := resp.DeviceId
 	heartbeatInterval := resp.HeartbeatIntervalSec
 
-	go heartbeat.Run(heartbeatCtx, client, deviceID, heartbeatInterval)
+	// Phase 4: 重连信号通道——心跳连续失败时通知 main
+	// 为什么 buffer=1？非阻塞发送——心跳 goroutine 只发一次信号。
+	reconnectCh := make(chan struct{}, 1)
+	go heartbeat.Run(heartbeatCtx, client, deviceID, heartbeatInterval, reconnectCh)
 	slog.Info("心跳循环已启动", "interval_sec", heartbeatInterval)
+
+	// Phase 4: 重连监控 goroutine
+	// 当心跳检测到 Controller 不可达并发送重连信号时，
+	// 此 goroutine 执行完整的重连→重注册→重启心跳流程。
+	go func() {
+		for range reconnectCh {
+			slog.Warn("收到重连信号，开始重连...")
+			reconnect(client, cfg, deviceInfo, heartbeatCtx, &deviceID, &heartbeatInterval, reconnectCh)
+		}
+	}()
 
 	// ---- 6. 启动 mDNS 广播 ----
 	// 为什么 mDNS 在注册之后启动？
@@ -113,7 +129,14 @@ func main() {
 	}
 
 	// ---- 7. 启动 gRPC 任务执行服务 ----
-	taskServer, err := transport.StartTaskServer(cfg.AgentPort)
+	// 创建执行器——负责在沙箱中执行命令并流式推送日志。
+	// 为什么 executor 在这里创建而不是在 transport/server.go 内部？
+	//   依赖注入——executor 依赖 sandbox，sandbox 在启动时检测。
+	//   main.go 负责组装所有依赖，transport 只负责 gRPC 处理。
+	sb := sandbox.DetectSandbox()
+	exec := executor.New(sb)
+
+	taskServer, err := transport.StartTaskServer(cfg.AgentPort, exec)
 	if err != nil {
 		slog.Error("gRPC 任务服务启动失败", "error", err)
 		os.Exit(1)
@@ -197,4 +220,76 @@ func main() {
 			"signal", sig.String())
 		os.Exit(1)
 	}
+}
+
+// ============================================================
+// reconnect — Phase 4: 心跳重连流程
+//
+// 当心跳连续失败超阈值时调用。执行完整的：
+//   Disconnect → Connect → Register → Restart Heartbeat
+//
+// 为什么需要重连而不是简单重试心跳？
+//   gRPC 连接可能在 TCP 层已经断开（防火墙超时、网络切换），
+//   但 gRPC 客户端不一定立即检测到。重新 Dial 建立全新连接
+//   比在旧连接上重试更可靠。
+// ============================================================
+
+func reconnect(
+	client *transport.DeviceServiceClient,
+	cfg *config.Config,
+	deviceInfo *pb.DeviceInfo,
+	heartbeatCtx context.Context,
+	deviceID *string,
+	heartbeatInterval *uint32,
+	reconnectCh chan<- struct{},
+) {
+	// 1. 关闭旧连接
+	slog.Info("正在关闭旧连接...")
+	client.Close()
+
+	// 2. 退避等待后重新连接
+	// 指数退避: 2s, 4s, 8s... 最多 30s
+	// 为什么需要退避？避免 Controller 重启时所有 Agent 同时涌入。
+	const maxBackoff = 30 * time.Second
+	staticBackoff := 3 * time.Second
+	if staticBackoff > maxBackoff {
+		staticBackoff = maxBackoff
+	}
+	slog.Info("等待后重新连接 Controller...", "backoff", staticBackoff)
+	time.Sleep(staticBackoff)
+
+	// 3. 重新连接
+	ctx := context.Background()
+	newClient, err := transport.Connect(ctx, cfg.ControllerHost, cfg.ControllerPort)
+	if err != nil {
+		slog.Error("重连失败——Connect", "error", err)
+		// 通知心跳循环重试
+		select {
+		case reconnectCh <- struct{}{}:
+		default:
+		}
+		return
+	}
+
+	// 4. 重新注册
+	resp, err := newClient.Register(ctx, deviceInfo)
+	if err != nil {
+		slog.Error("重连失败——Register", "error", err)
+		newClient.Close()
+		select {
+		case reconnectCh <- struct{}{}:
+		default:
+		}
+		return
+	}
+
+	// 5. 替换 client（注意：旧 client 已经 Close，新 client 替换它）
+	*client = *newClient
+	*deviceID = resp.DeviceId
+	*heartbeatInterval = resp.HeartbeatIntervalSec
+
+	slog.Info("重连成功", "device_id", resp.DeviceId)
+
+	// 6. 重启心跳循环
+	go heartbeat.Run(heartbeatCtx, client, resp.DeviceId, resp.HeartbeatIntervalSec, reconnectCh)
 }

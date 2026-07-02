@@ -29,3 +29,28 @@ export interface Device {
   /** 最后心跳时间（ISO 8601 格式） */
   last_heartbeat: string
 }
+
+// ============================================================
+// Phase 2: 任务相关类型
+// ============================================================
+
+export type JobState = 'QUEUED' | 'ASSIGNED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+
+export interface Job {
+  id: string
+  name: string
+  command: string
+  args: string[]
+  env: Record<string, string>
+  status: JobState
+  device_id: string
+  exit_code: number
+  logs?: LogLine[]
+  created_at: string
+}
+
+export interface LogLine {
+  stream_type: 'stdout' | 'stderr'
+  data: string
+  timestamp: string
+}

@@ -29,6 +29,7 @@ import (
 
 	"github.com/localpilot/controller/internal/api"
 	"github.com/localpilot/controller/internal/discovery"
+	"github.com/localpilot/controller/internal/job"
 	"github.com/localpilot/controller/internal/registry"
 	"github.com/localpilot/controller/internal/scheduler"
 	"github.com/localpilot/controller/internal/transport"
@@ -72,10 +73,28 @@ func main() {
 	go devRegistry.StartHealthChecker(1*time.Second)
 
 	// ---- 4. 初始化调度器 ----
-	// 调度器从任务队列中取任务，根据设备能力打分，分配到最优设备。
+	// Phase 3: 多维打分调度器——根据 CPU/内存/架构/延迟/GPU 选设备。
 	sch := scheduler.NewScheduler(devRegistry)
 
-	// ---- 5. 启动 gRPC 服务器 ----
+	// ---- 5. 初始化 Job 子系统 ----
+	// Job 子系统负责任务的提交、队列、下发执行。
+	// 为什么 Job 和 Device Registry 共享同一个 SQLite？
+	//   SQLite 支持多表——拆分文件不会带来任何好处。
+	//   同一文件简化了部署和备份。
+	jobStore, err := job.NewStore(store.DB())
+	if err != nil {
+		log.Fatalf("Job 存储初始化失败: %v", err)
+	}
+	jobQueue := job.NewQueue()
+	jobManager := job.NewManager(jobStore, jobQueue, devRegistry, sch)
+	go jobManager.StartWorker(context.Background())
+
+	// Phase 4: 注册设备离线回调 → 触发任务迁移
+	registry.SetDeviceOfflineCallback(jobManager.MigrateTasksFromDevice)
+
+	log.Println("Job 子系统已初始化（含任务迁移）")
+
+	// ---- 6. 启动 gRPC 服务器 ----
 	// Controller 是 gRPC server——Agent 调用 Controller 的 Register/Heartbeat/Deregister。
 	grpcPort := getEnv("LOCALPILOT_GRPC_PORT", "50051")
 	grpcServer := transport.NewGRPCServer(devRegistry, sch)
@@ -89,7 +108,7 @@ func main() {
 	// ---- 6. 启动 HTTP 服务器（gin） ----
 	// 为 Dashboard 提供 REST API + WebSocket。
 	httpPort := getEnv("LOCALPILOT_HTTP_PORT", "8080")
-	router := api.NewRouter(devRegistry, sch)
+	router := api.NewRouter(devRegistry, sch, jobManager)
 	go func() {
 		log.Printf("HTTP API 服务启动在 0.0.0.0:%s", httpPort)
 		if err := http.ListenAndServe(":"+httpPort, router); err != nil {

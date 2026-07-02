@@ -4,10 +4,7 @@
 // Agent 同时也是 gRPC server——Controller 通过这个服务
 // 向 Agent 下发任务（Execute）和取消任务（CancelTask）。
 //
-// 当前 Phase 0：骨架实现，Execute 返回空 stream。
-// Phase 2 会接入真实的 executor 模块。
-//
-// 与 Rust 版本 (agent/src/transport.rs TaskExecutionServiceImpl) 对应。
+// Phase 2: 接入 executor 模块，真实执行命令并流式推送日志。
 // ============================================================
 
 package transport
@@ -19,6 +16,7 @@ import (
 	"net"
 
 	pb "github.com/localpilot/proto/localpilot/v1"
+	"github.com/localpilot/agent/internal/executor"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -37,18 +35,13 @@ type TaskExecutionServer struct {
 }
 
 // taskExecutionServiceImpl 实现 TaskExecutionServiceServer 接口
-//
-// 当前 Phase 0：骨架实现，所有方法返回占位响应。
-// Phase 2 接入 real executor。
 type taskExecutionServiceImpl struct {
 	pb.UnimplementedTaskExecutionServiceServer
+	executor *executor.Executor // 任务执行器，负责实际执行命令
 }
 
 // StartTaskServer 启动 Agent 侧的 gRPC 任务执行服务
-//
-// 这个函数在 main.go 的最后调用，会阻塞当前 goroutine 直到服务停止。
-// 与 Rust 版本 start_task_server() 对应。
-func StartTaskServer(port uint16) (*TaskExecutionServer, error) {
+func StartTaskServer(port uint16, exec *executor.Executor) (*TaskExecutionServer, error) {
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -56,7 +49,7 @@ func StartTaskServer(port uint16) (*TaskExecutionServer, error) {
 	}
 
 	grpcServer := grpc.NewServer()
-	impl := &taskExecutionServiceImpl{}
+	impl := &taskExecutionServiceImpl{executor: exec}
 
 	// 注册 TaskExecutionService 实现
 	pb.RegisterTaskExecutionServiceServer(grpcServer, impl)
@@ -89,62 +82,106 @@ func (s *TaskExecutionServer) Stop() {
 // ============================================================
 // Execute — Controller 下发任务（server-streaming）
 //
-// Controller 发送一个 ExecuteRequest，Agent 返回一个 LogChunk stream。
+// Controller 发送 ExecuteRequest，Agent 在沙箱中执行命令，
+// 通过 server-streaming 实时推送 stdout/stderr 日志。
+//
 // 为什么是 server-streaming？
-//   Agent 执行命令的同时需要实时推送日志到 Controller，
-//   而不是等执行完一次性返回。Controller 再把日志通过 WebSocket
-//   推到 Dashboard，用户在浏览器里看到实时滚动。
+//   命令可能运行几分钟甚至几小时（如视频转码）。
+//   server-streaming 让 Controller 和 Dashboard 能实时看到
+//   命令输出——就像在终端里看 ping 逐行输出一样。
+//
+// 数据流：
+//   ExecuteRequest → executor.Execute() → LogChunk channel
+//     → stream.Send(logChunk) → Controller 接收
 // ============================================================
 
-// Execute 处理任务执行请求
-//
-// Phase 0: 返回空 stream——只验证 gRPC 链路。
-// Phase 2: 接入 executor 模块，实时推送执行日志。
-//
-// 与 Rust 版本 execute() 对应。
+// Execute 处理任务执行请求，实时流式推送日志
 func (s *taskExecutionServiceImpl) Execute(
 	req *pb.ExecuteRequest,
 	stream pb.TaskExecutionService_ExecuteServer,
 ) error {
 	slog.Info("收到任务执行请求",
-		"task_id", req.TaskId,
-		"command", req.Command,
+		"task_id", req.GetTaskId(),
+		"command", req.GetCommand(),
+		"args", req.GetArgs(),
 	)
 
-	// Phase 0: 不实际执行任何命令，只发送一条确认日志后关闭 stream
-	logChunk := &pb.LogChunk{
-		TaskId:    req.TaskId,
-		StreamType: pb.StreamType_STREAM_TYPE_STDOUT,
-		Data:      []byte("[Phase 0] 任务已接收，Agent 骨架就绪\n"),
-		SeqNum:    0,
+	// 委托给 executor 执行
+	result := s.executor.Execute(
+		stream.Context(),
+		req.GetTaskId(),
+		req.GetCommand(),
+		req.GetArgs(),
+		req.GetEnv(),
+		req.GetResourceLimits(),
+	)
+
+	// ---- 流式推送日志 ----
+	// 从 LogChunks channel 逐条读取，通过 gRPC stream 发送给 Controller。
+	// 为什么不用 for range channel？
+	//   需要检查 stream.Context() 是否已取消——Controller 可能断开连接。
+	for logChunk := range result.LogChunks {
+		// 检查客户端是否还在连接
+		if stream.Context().Err() != nil {
+			slog.Warn("客户端已断开，停止推送日志", "task_id", req.GetTaskId())
+			return stream.Context().Err()
+		}
+
+		if err := stream.Send(logChunk); err != nil {
+			slog.Error("发送日志 chunk 失败", "task_id", req.GetTaskId(), "error", err)
+			return fmt.Errorf("发送日志失败: %w", err)
+		}
 	}
 
-	if err := stream.Send(logChunk); err != nil {
-		slog.Error("发送日志 chunk 失败", "task_id", req.TaskId, "error", err)
+	// ---- 等待任务完成 ----
+	<-result.Done
+
+	// 发送最终状态日志
+	if result.Err != nil {
+		finalChunk := &pb.LogChunk{
+			TaskId:    req.GetTaskId(),
+			StreamType: pb.StreamType_STREAM_TYPE_STDERR,
+			Data:      []byte(fmt.Sprintf("[ERROR] 任务执行失败: %v\n", result.Err)),
+		}
+		if err := stream.Send(finalChunk); err != nil {
+			return err
+		}
+		return result.Err
+	}
+
+	// 发送完成日志
+	finalChunk := &pb.LogChunk{
+		TaskId:    req.GetTaskId(),
+		StreamType: pb.StreamType_STREAM_TYPE_STDOUT,
+		Data:      []byte(fmt.Sprintf("[DONE] 任务完成，退出码: %d\n", result.Result.ExitCode)),
+	}
+	if err := stream.Send(finalChunk); err != nil {
 		return err
 	}
 
-	slog.Info("任务执行请求处理完成（Phase 0 不实际执行）", "task_id", req.TaskId)
+	slog.Info("任务执行完成并已推送全部日志",
+		"task_id", req.GetTaskId(),
+		"exit_code", result.Result.ExitCode,
+	)
+
 	return nil
 }
 
 // CancelTask 取消正在执行的任务
-//
-// Phase 0: 骨架——直接返回接受。
-// Phase 2: 调用 executor 中止对应进程。
-//
-// 与 Rust 版本 cancel_task() 对应。
 func (s *taskExecutionServiceImpl) CancelTask(
 	ctx context.Context,
 	req *pb.CancelTaskRequest,
 ) (*pb.CancelTaskResponse, error) {
 	slog.Info("收到取消任务请求",
-		"task_id", req.TaskId,
-		"reason", req.Reason,
+		"task_id", req.GetTaskId(),
+		"reason", req.GetReason(),
 	)
 
-	// Phase 0: 直接接受
-	return &pb.CancelTaskResponse{
-		Accepted: true,
-	}, nil
+	err := s.executor.Cancel(req.GetTaskId())
+	if err != nil {
+		slog.Warn("取消任务失败", "task_id", req.GetTaskId(), "error", err)
+		return &pb.CancelTaskResponse{Accepted: false}, err
+	}
+
+	return &pb.CancelTaskResponse{Accepted: true}, nil
 }
