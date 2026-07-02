@@ -1,0 +1,167 @@
+// ============================================================
+// agent.proto — Agent 与 Controller 之间的设备管理通信定义
+//
+// 为什么需要这个文件？
+//   设备注册、心跳、注销是独立于任务执行的基础协议层。
+//   把它们和 task.proto 分开，因为两者的变更频率不同：
+//   设备管理协议一旦稳定很少改动，任务协议会随着功能迭代频繁变化。
+// ============================================================
+
+syntax = "proto3";
+
+package localpilot.v1;
+
+option go_package = "github.com/localpilot/proto/localpilot/v1";
+
+// 导入 task.proto 是为了让 Agent 的心跳中可以携带正在运行的任务列表
+import "localpilot/v1/task.proto";
+
+// ============================================================
+// DeviceService — Agent 调用 Controller 的设备管理 RPC
+// 所有 RPC 都由 Agent 发起，Controller 是 server 端
+// ============================================================
+service DeviceService {
+  // Register: Agent 启动时调用，向 Controller 注册自己的存在和能力
+  // 返回一个 device_id，后续所有通信都用这个 ID 标识自己
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // Heartbeat: Agent 每 5 秒调用一次，上报当前系统状态
+  // Controller 靠这个判断设备是否还活着
+  // 使用 server-streaming 还是 unary？unary 更简单，5 秒一次不需要 streaming
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Deregister: Agent 正常退出时调用，从集群中移除自己
+  rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+}
+
+// ============================================================
+// TaskExecutionService — Controller 调用 Agent 的任务执行 RPC
+// 所有 RPC 都由 Controller 发起，Agent 是 server 端
+// ============================================================
+service TaskExecutionService {
+  // Execute: Controller 下发任务给 Agent
+  // 返回一个 stream，Agent 通过这个 stream 实时推送执行日志
+  rpc Execute(ExecuteRequest) returns (stream LogChunk);
+
+  // CancelTask: Controller 取消一个正在执行的任务
+  // 用于用户手动取消、或者设备即将离线时的任务迁移
+  rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
+}
+
+// ============================================================
+// 消息定义
+// ============================================================
+
+// DeviceInfo: 描述一台计算设备的所有静态能力
+// 为什么需要这么多字段？
+//   调度器需要足够的信息来决定"这个任务该分配给谁"
+//   比如 GPU 任务不能发给树莓派，ARM 二进制不能发给 x86 设备
+message DeviceInfo {
+  string hostname = 1;           // 设备主机名，如 "pi4-livingroom"
+  string os = 2;                 // 操作系统，如 "linux" / "macos" / "windows"
+  string arch = 3;               // CPU 架构，如 "x86_64" / "aarch64" / "armv7l"
+  uint32 cpu_cores = 4;          // 逻辑 CPU 核心数
+  uint64 total_ram_bytes = 5;    // 总内存（字节）
+  string gpu_info = 6;           // GPU 信息，如 "Apple M1" / "NVIDIA RTX 3060" / "" (无 GPU)
+  repeated string supported_runtimes = 7; // 支持的运行时，如 ["docker", "process"]
+}
+
+// ResourceUsage: 描述设备当前资源使用情况
+// 所有百分比为 0.0 ~ 1.0 的浮点数
+message ResourceUsage {
+  float cpu_percent = 1;         // CPU 使用率，0.0 ~ 1.0
+  uint64 used_ram_bytes = 2;     // 已用内存（字节）
+  uint64 used_disk_bytes = 3;    // 已用磁盘（字节）
+  float cpu_temperature_celsius = 4; // CPU 温度（摄氏度），不可用时为 -1
+  uint32 running_task_count = 5; // 当前正在执行的任务数
+}
+
+// ============================================================
+// Register — Agent 上线注册
+// ============================================================
+
+message RegisterRequest {
+  DeviceInfo device_info = 1;    // 设备的静态能力信息
+}
+
+message RegisterResponse {
+  string device_id = 1;          // Controller 分配的唯一设备 ID（UUID）
+  uint32 heartbeat_interval_sec = 2; // Controller 要求的心跳间隔（秒）
+}
+
+// ============================================================
+// Heartbeat — Agent 定期上报
+// ============================================================
+
+message HeartbeatRequest {
+  string device_id = 1;          // Controller 分配的设备 ID
+  ResourceUsage resource_usage = 2; // 当前资源使用情况
+}
+
+message HeartbeatResponse {
+  // 当前为空，预留将来 Controller 可以通过心跳响应下发指令
+  // 例如：Controller 检测到设备温度过高，可以在这里告知 Agent 降低负载
+}
+
+// ============================================================
+// Deregister — Agent 正常下线
+// ============================================================
+
+message DeregisterRequest {
+  string device_id = 1;          // 要注销的设备 ID
+  string reason = 2;             // 下线原因，如 "user_shutdown" / "maintenance"
+}
+
+message DeregisterResponse {
+  bool accepted = 1;             // Controller 是否确认注销
+}
+
+// ============================================================
+// Execute — Controller 下发任务
+// ============================================================
+
+message ExecuteRequest {
+  string task_id = 1;            // 任务 ID（Controller 分配）
+  string command = 2;            // 要执行的命令，如 "ffmpeg"
+  repeated string args = 3;      // 命令参数，如 ["-i", "video.mp4", "-vf", "scale=1920:1080", "output.mp4"]
+  map<string, string> env = 4;   // 环境变量
+  repeated string input_file_urls = 5; // 输入文件的下载地址（从 Controller 文件服务器拉取）
+  ResourceLimits resource_limits = 6;  // 资源限制（定义在 task.proto 中，import 复用）
+}
+
+// ============================================================
+// LogChunk — Agent 实时推送的日志片段
+//
+// 为什么需要 seq_num？
+//   网络不保证顺序。Controller 收到 LogChunk 后按 seq_num 重组，
+//   保证 Dashboard 上显示的日志顺序正确。
+// 为什么需要 stream_type？
+//   Dashboard 可以根据类型给 stderr 标红、stdout 标白。
+// ============================================================
+
+message LogChunk {
+  string task_id = 1;            // 所属任务 ID
+  StreamType stream_type = 2;    // stdout 还是 stderr
+  bytes data = 3;                // 日志内容（bytes 避免 UTF-8 校验问题）
+  int64 timestamp_unix_ms = 4;   // Agent 侧时间戳（毫秒）
+  int64 seq_num = 5;             // 序号，从 0 开始递增，用于排序和丢包检测
+}
+
+enum StreamType {
+  STREAM_TYPE_UNSPECIFIED = 0;
+  STREAM_TYPE_STDOUT = 1;
+  STREAM_TYPE_STDERR = 2;
+}
+
+// ============================================================
+// CancelTask — 取消任务
+// ============================================================
+
+message CancelTaskRequest {
+  string task_id = 1;            // 要取消的任务 ID
+  string reason = 2;             // 取消原因，如 "user_cancelled" / "device_offline_migration"
+}
+
+message CancelTaskResponse {
+  bool accepted = 1;             // Agent 是否接受了取消请求
+}

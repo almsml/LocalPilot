@@ -1,0 +1,33 @@
+// ============================================================
+// discovery.proto — 服务发现相关定义
+//
+// 为什么这个文件几乎是空的？
+//   服务发现走的是 mDNS，不需要 Protobuf 定义。
+//   这个文件的存在是为了：
+//   1. 记录 mDNS 服务名（_localpilot._tcp），防止拼写错误
+//   2. 预留将来替换 mDNS 为其他发现机制时的扩展点
+//   3. 让 proto/ 目录结构完整——discovery 是三个核心子系统之一
+//
+// ============================================================
+
+syntax = "proto3";
+
+package localpilot.v1;
+
+option go_package = "github.com/localpilot/proto/localpilot/v1";
+
+// DiscoveryService 暂时为空——mDNS 不需要 gRPC 服务定义。
+// 将来如果替换为基于 gRPC 的服务发现，在这里添加 RPC 定义。
+service DiscoveryService {
+  // 预留
+}
+
+// DiscoveryConfig: mDNS 服务发现配置
+// 虽然不用 protobuf 传输，但用 proto 定义配置可以让
+// 所有组件共享同一个常量定义。
+// 在实际代码中，这些值会通过 proto 生成的常量来引用。
+
+// mDNS 服务类型常量（通过 proto 注释约定，代码中硬编码）：
+//   SERVICE_TYPE = "_localpilot._tcp"
+//   SERVICE_DOMAIN = "local."
+//   SERVICE_PORT  = 50051  (gRPC 默认端口)

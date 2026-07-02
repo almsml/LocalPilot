@@ -1,0 +1,28 @@
+{
+  "name": "localpilot-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LocalPilot 仪表板 — 设备监控、任务提交、实时日志",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.0.0",
+    "@xyflow/react": "^12.0.0",
+    "ansi-to-html": "^0.7.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "react-hot-toast": "^2.4.0",
+    "recharts": "^2.12.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  }
+}

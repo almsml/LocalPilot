@@ -1,0 +1,121 @@
+// ============================================================
+// task.proto — 任务模型定义
+//
+// 为什么任务模型单独一个文件？
+//   任务的状态机、分片策略、资源约束这些概念是独立的领域模型。
+//   agent.proto 依赖这里定义的 Task，discovery.proto 不依赖任何东西。
+//   分离后各 proto 文件职责单一，变更影响范围可控。
+// ============================================================
+
+syntax = "proto3";
+
+package localpilot.v1;
+
+option go_package = "github.com/localpilot/proto/localpilot/v1";
+
+// ============================================================
+// Task — 一个计算任务
+// ============================================================
+
+message Task {
+  string id = 1;                 // 任务唯一 ID（UUID，Controller 分配）
+  string name = 2;               // 人类可读的任务名，如 "视频A转码"
+  string command = 3;            // 要执行的命令
+  repeated string args = 4;      // 命令参数
+  map<string, string> env = 5;   // 环境变量
+  repeated string input_file_urls = 6; // 输入文件 URL
+  ResourceLimits resource_limits = 7;  // 资源限制
+  TaskSharding sharding = 8;     // 分片策略（如果可分片）
+  int64 created_at_unix_ms = 9;  // 创建时间
+}
+
+// ResourceLimits: 任务的资源约束
+message ResourceLimits {
+  float cpu_limit = 1;           // CPU 核心数上限，0 表示不限
+  uint64 mem_limit_bytes = 2;    // 内存上限（字节），0 表示不限
+  uint32 timeout_sec = 3;        // 超时（秒），0 表示不限
+}
+
+// ============================================================
+// TaskStatus — 任务生命周期状态机
+//
+// QUEUED → ASSIGNED → RUNNING → COMPLETED
+//                     ↘ RUNNING → FAILED
+// 任何状态 → CANCELLED（用户或系统取消）
+//
+// 为什么需要这么多状态而不是只有"成功/失败"？
+//   调度和故障迁移需要知道任务当前在哪个阶段。
+//   如果一个任务是 ASSIGNED 状态（已分配但还没开始跑），
+//   设备离线时可以直接重分配，不需要关心 checkpoint。
+// ============================================================
+
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_QUEUED = 1;        // 已入队，等待调度
+  TASK_STATUS_ASSIGNED = 2;      // 已分配给设备，等待执行
+  TASK_STATUS_RUNNING = 3;       // 正在执行
+  TASK_STATUS_COMPLETED = 4;     // 执行成功
+  TASK_STATUS_FAILED = 5;        // 执行失败
+  TASK_STATUS_CANCELLED = 6;     // 已取消
+}
+
+// ============================================================
+// TaskSharding — 任务分片策略
+//
+// 可分片的任务会被拆成多个子任务并行执行。
+// 例如：一个 10 分钟的视频切成 3 段，每段约 3.3 分钟，
+// 3 台设备各处理一段，理论上 3 倍加速。
+// ============================================================
+
+message TaskSharding {
+  ShardingStrategy strategy = 1; // 分片策略
+  uint32 total_shards = 2;       // 总分片数
+  uint32 shard_index = 3;        // 当前子任务的索引（0-based）
+  string shard_key = 4;          // 分片键，含义取决于策略
+                                 // RANGE: "0-100" 表示处理前 100 帧
+                                 // CHUNK: "file_001.dat" 表示处理这个文件
+                                 // PARAM: "lr=0.01,bs=32" 表示这组超参
+
+  // 子任务引用，用于在 Dashboard 上展示分片进度
+  repeated string child_task_ids = 5;
+}
+
+enum ShardingStrategy {
+  SHARDING_STRATEGY_UNSPECIFIED = 0;
+  SHARDING_STRATEGY_NONE = 1;    // 不可分片，整个任务在一台设备上执行
+  SHARDING_STRATEGY_RANGE = 2;   // 按数字范围分片（ffmpeg 按帧范围）
+  SHARDING_STRATEGY_CHUNK = 3;   // 按文件分片（文件列表分成 N 份）
+  SHARDING_STRATEGY_PARAM = 4;   // 按参数组合分片（网格搜索超参调优）
+}
+
+// ============================================================
+// TaskResult — 任务执行结果
+// ============================================================
+
+message TaskResult {
+  string task_id = 1;            // 任务 ID
+  TaskStatus status = 2;         // 最终状态
+  int32 exit_code = 3;           // 进程退出码（-1 表示被信号杀死）
+  repeated string output_file_urls = 4; // 输出文件下载地址
+  string error_message = 5;      // 错误信息（失败时）
+  int64 started_at_unix_ms = 6;  // 开始执行时间
+  int64 finished_at_unix_ms = 7; // 完成时间
+  uint32 attempt_number = 8;     // 第几次尝试（用于追踪重试）
+}
+
+// ============================================================
+// Checkpoint — 断点数据
+//
+// Agent 定期上传，用于故障后从断点恢复。
+// 不是所有任务都支持 checkpoint（比如网络请求），
+// 不可恢复的任务标记为 FAILED_IMMUTABLE。
+// ============================================================
+
+message Checkpoint {
+  string task_id = 1;            // 任务 ID
+  int64 seq_num = 2;             // checkpoint 序号
+  uint32 attempt_number = 3;     // 尝试次数
+  bytes state_data = 4;          // 任务自定义的状态数据
+  repeated string output_file_urls = 5; // 已产生的中间文件
+  int64 created_at_unix_ms = 6;  // checkpoint 创建时间
+}
